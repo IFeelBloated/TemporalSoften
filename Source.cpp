@@ -156,7 +156,7 @@ auto VS_CC temporalSoftenFree(void *instanceData, VSCore *core, const VSAPI *vsa
 }
 
 auto VS_CC temporalSoftenCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
-	TemporalSoftenData *data = new TemporalSoftenData;
+	auto data = new TemporalSoftenData;
 	auto err = 0;
 	data->node = vsapi->propGetNode(in, "clip", 0, 0);
 	data->vi = vsapi->getVideoInfo(data->node);
