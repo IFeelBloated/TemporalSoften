@@ -4,9 +4,9 @@
 #include "VapourSynth.h"
 
 enum class PixelType {
-	Integer8 = 8,
-	Integer9to16 = 16,
-	Single = 32
+	Integer8 = 1,
+	Integer9to16 = 2,
+	Single = 4
 };
 
 struct TemporalSoftenData final {
@@ -22,13 +22,12 @@ auto VS_CC temporalSoftenInit(VSMap *in, VSMap *out, void **instanceData, VSNode
 	auto d = reinterpret_cast<TemporalSoftenData *>(*instanceData);
 	vsapi->setVideoInfo(d->vi, 1, node);
 	d->scenechange *= d->vi->width / 32 * 32 * d->vi->height;
-	auto bits = d->vi->format->bitsPerSample;
-	auto pixel = static_cast<PixelType>(bits > 8 && bits < 16 ? 16 : bits);
+	auto pixel = static_cast<PixelType>(d->vi->format->bytesPerSample);
 	switch (pixel) {
 	case PixelType::Integer9to16:
-		d->luma_threshold *= ((1 << bits) - 1) / 255.;
-		d->chroma_threshold *= ((1 << bits) - 1) / 255.;
-		d->scenechange *= ((1 << bits) - 1) / 255.;
+		d->luma_threshold *= ((1 << d->vi->format->bitsPerSample) - 1) / 255.;
+		d->chroma_threshold *= ((1 << d->vi->format->bitsPerSample) - 1) / 255.;
+		d->scenechange *= ((1 << d->vi->format->bitsPerSample) - 1) / 255.;
 		break;
 	case PixelType::Single:
 		d->luma_threshold /= 255;
@@ -61,9 +60,8 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 			src[i - n + d->radius] = vsapi->getFrameFilter(std::min(d->vi->numFrames - 1, std::max(i, 0)), d->node, frameCtx);
 		auto dst = vsapi->copyFrame(src[d->radius], core);
 		auto fi = d->vi->format;
-		auto bits = fi->bitsPerSample;
-		auto pixel = static_cast<PixelType>(bits > 8 && bits < 16 ? 16 : bits);
-		auto pmax = (1 << bits) - 1;
+		auto pixel = static_cast<PixelType>(fi->bytesPerSample);
+		auto pmax = (1 << fi->bitsPerSample) - 1;
 		for (auto plane = 0; plane < fi->numPlanes; ++plane) {
 			if (fi->colorFamily != cmRGB) {
 				if (plane == 0 && d->luma_threshold == 0.)
@@ -91,81 +89,67 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 			auto dstp = vsapi->getWritePtr(dst, plane);
 			auto h = vsapi->getFrameHeight(src[d->radius], plane);
 			auto w = vsapi->getFrameWidth(src[d->radius], plane);
-			auto sc_f = [=](auto srcp, auto dstp, auto stride, auto &sum) {
-				auto wp = w / 32 * 32;
-				sum = 0;
-				for (auto y = 0; y < h; ++y)
-					for (auto x = 0; x < wp; ++x)
-						sum += std::abs(static_cast<decltype(sum + 0)>(srcp[x + y * stride / sizeof(srcp[0])]) - dstp[x + y * dst_stride / sizeof(dstp[0])]);
-			};
+			auto sum_ptr = alloca(std::max(sizeof(long long), sizeof(double)));
 			if (d->scenechange > 0.) {
 				auto dd2 = 0;
 				auto skiprest = false;
+				auto scenechange_lambda = [&](auto srcp, auto dstp, auto sum_ptr, auto i) {
+					auto &scenevalues = *sum_ptr;
+					auto wp = w / 32 * 32;
+					scenevalues = 0;
+					for (auto y = 0; y < h; ++y)
+						for (auto x = 0; x < wp; ++x)
+							scenevalues += std::abs(static_cast<decltype(scenevalues + 0)>(srcp[x + y * src_stride[i] / sizeof(srcp[0])]) - dstp[x + y * dst_stride / sizeof(dstp[0])]);
+					if (scenevalues < d->scenechange) {
+						src_stride_trimmed[dd2] = src_stride[i];
+						srcp_trimmed[dd2] = reinterpret_cast<decltype(srcp_trimmed[0])>(srcp);
+						++dd2;
+					}
+					else
+						skiprest = true;
+					planeDisabled[i] = skiprest;
+				};
 				for (auto i = d->radius - 1; i >= 0; --i)
-					if (!skiprest && !planeDisabled[i]) {
-						auto sum_ptr = alloca(std::max(sizeof(long long), sizeof(double)));
-						auto f = [&](auto srcp, auto dstp, auto sum_ptr) {
-							auto &scenevalues = *sum_ptr;
-							sc_f(srcp, dstp, src_stride[i], scenevalues);
-							if (scenevalues < d->scenechange) {
-								src_stride_trimmed[dd2] = src_stride[i];
-								srcp_trimmed[dd2] = reinterpret_cast<decltype(srcp_trimmed[0])>(srcp);
-								++dd2;
-							}
-							else
-								skiprest = true;
-							planeDisabled[i] = skiprest;
-						};
+					if (!skiprest && !planeDisabled[i])
 						switch (pixel) {
 						case PixelType::Single:
-							f(reinterpret_cast<const float *>(srcp[i]),
+							scenechange_lambda(reinterpret_cast<const float *>(srcp[i]),
 								reinterpret_cast<float *>(dstp),
-								reinterpret_cast<double *>(sum_ptr));
+								reinterpret_cast<double *>(sum_ptr),
+								i);
 							break;
 						case PixelType::Integer9to16:
-							f(reinterpret_cast<const uint16_t *>(srcp[i]),
+							scenechange_lambda(reinterpret_cast<const uint16_t *>(srcp[i]),
 								reinterpret_cast<uint16_t *>(dstp),
-								reinterpret_cast<long long *>(sum_ptr));
+								reinterpret_cast<long long *>(sum_ptr),
+								i);
 							break;
 						default:
-							f(srcp[i], dstp, reinterpret_cast<long long *>(sum_ptr));
+							scenechange_lambda(srcp[i], dstp, reinterpret_cast<long long *>(sum_ptr), i);
 							break;
 						}
-					}
 					else
 						planeDisabled[i] = true;
 				skiprest = false;
 				for (auto i = 0; i < d->radius; ++i)
-					if (!skiprest && !planeDisabled[i + d->radius]) {
-						auto sum_ptr = alloca(std::max(sizeof(long long), sizeof(double)));
-						auto f = [&](auto srcp, auto dstp, auto sum_ptr) {
-							auto &scenevalues = *sum_ptr;
-							sc_f(srcp, dstp, src_stride[i + d->radius], scenevalues);
-							if (scenevalues < d->scenechange) {
-								src_stride_trimmed[dd2] = src_stride[i + d->radius];
-								srcp_trimmed[dd2] = reinterpret_cast<decltype(srcp_trimmed[0])>(srcp);
-								++dd2;
-							}
-							else
-								skiprest = true;
-							planeDisabled[i + d->radius] = skiprest;
-						};
+					if (!skiprest && !planeDisabled[i + d->radius])
 						switch (pixel) {
 						case PixelType::Single:
-							f(reinterpret_cast<const float *>(srcp[i + d->radius]),
+							scenechange_lambda(reinterpret_cast<const float *>(srcp[i + d->radius]),
 								reinterpret_cast<float *>(dstp),
-								reinterpret_cast<double *>(sum_ptr));
+								reinterpret_cast<double *>(sum_ptr),
+								i + d->radius);
 							break;
 						case PixelType::Integer9to16:
-							f(reinterpret_cast<const uint16_t *>(srcp[i + d->radius]),
+							scenechange_lambda(reinterpret_cast<const uint16_t *>(srcp[i + d->radius]),
 								reinterpret_cast<uint16_t *>(dstp),
-								reinterpret_cast<long long *>(sum_ptr));
+								reinterpret_cast<long long *>(sum_ptr),
+								i + d->radius);
 							break;
 						default:
-							f(srcp[i + d->radius], dstp, reinterpret_cast<long long *>(sum_ptr));
+							scenechange_lambda(srcp[i + d->radius], dstp, reinterpret_cast<long long *>(sum_ptr), i + d->radius);
 							break;
 						}
-					}
 					else
 						planeDisabled[i + d->radius] = true;
 				memcpy(srcp, srcp_trimmed, dd2 * sizeof(srcp[0]));
@@ -179,8 +163,7 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 			}
 			auto div = dd + 1;
 			for (auto y = 0; y < h; ++y) {
-				auto sum_ptr = alloca(std::max(sizeof(long long), sizeof(double)));
-				auto f = [&](auto srcp, auto dstp, auto sum_ptr) {
+				auto accumulate_line = [&](auto srcp, auto dstp, auto sum_ptr) {
 					for (auto x = 0; x < w; ++x) {
 						auto &sum = *sum_ptr;
 						sum = dstp[x];
@@ -203,17 +186,17 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 				};
 				switch (pixel) {
 				case PixelType::Single:
-					f(reinterpret_cast<const float **>(srcp),
+					accumulate_line(reinterpret_cast<const float **>(srcp),
 						reinterpret_cast<float *>(dstp),
 						reinterpret_cast<double *>(sum_ptr));
 					break;
 				case PixelType::Integer9to16:
-					f(reinterpret_cast<const uint16_t **>(srcp),
+					accumulate_line(reinterpret_cast<const uint16_t **>(srcp),
 						reinterpret_cast<uint16_t *>(dstp),
 						reinterpret_cast<long long *>(sum_ptr));
 					break;
 				default:
-					f(srcp, dstp, reinterpret_cast<long long *>(sum_ptr));
+					accumulate_line(srcp, dstp, reinterpret_cast<long long *>(sum_ptr));
 					break;
 				}
 				for (auto i = 0; i < dd; ++i)
