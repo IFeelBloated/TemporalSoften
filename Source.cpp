@@ -1,6 +1,13 @@
 #include <algorithm>
 #include <cstdlib>
+#include <malloc.h>
 #include "VapourSynth.h"
+
+enum class PixelType {
+	Integer8 = 8,
+	Integer16 = 16,
+	Single = 32
+};
 
 struct TemporalSoftenData final {
 	VSNodeRef *node = nullptr;
@@ -15,9 +22,21 @@ auto VS_CC temporalSoftenInit(VSMap *in, VSMap *out, void **instanceData, VSNode
 	auto d = reinterpret_cast<TemporalSoftenData *>(*instanceData);
 	vsapi->setVideoInfo(d->vi, 1, node);
 	d->scenechange *= d->vi->width / 32 * 32 * d->vi->height;
-	d->luma_threshold /= 255;
-	d->chroma_threshold /= 255;
-	d->scenechange /= 255;
+	auto pixel = static_cast<PixelType>(d->vi->format->bitsPerSample);
+	switch (pixel) {
+	case PixelType::Integer16:
+		d->luma_threshold *= 257;
+		d->chroma_threshold *= 257;
+		d->scenechange *= 257;
+		break;
+	case PixelType::Single:
+		d->luma_threshold /= 255;
+		d->chroma_threshold /= 255;
+		d->scenechange /= 255;
+		break;
+	default:
+		break;
+	}
 }
 
 auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi)->const VSFrameRef *{
@@ -41,6 +60,8 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 			src[i - n + d->radius] = vsapi->getFrameFilter(std::min(d->vi->numFrames - 1, std::max(i, 0)), d->node, frameCtx);
 		auto dst = vsapi->copyFrame(src[d->radius], core);
 		auto fi = d->vi->format;
+		auto pixel = static_cast<PixelType>(fi->bitsPerSample);
+		auto pmax = (1 << fi->bitsPerSample) - 1;
 		for (auto plane = 0; plane < fi->numPlanes; ++plane) {
 			if (fi->colorFamily != cmRGB) {
 				if (plane == 0 && d->luma_threshold == 0.)
@@ -68,45 +89,80 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 			auto dstp = vsapi->getWritePtr(dst, plane);
 			auto h = vsapi->getFrameHeight(src[d->radius], plane);
 			auto w = vsapi->getFrameWidth(src[d->radius], plane);
-			auto c_scenechange = [=](auto plane, auto stride) {
+			auto sc_f = [=](auto srcp, auto dstp, auto stride, auto &sum) {
 				auto wp = w / 32 * 32;
-				auto sum = 0.;
-				auto dstptr = reinterpret_cast<float *>(dstp);
-				auto srcptr = reinterpret_cast<const float *>(plane);
+				sum = 0;
 				for (auto y = 0; y < h; ++y)
 					for (auto x = 0; x < wp; ++x)
-						sum += std::abs(static_cast<double>(srcptr[x + y * stride / sizeof(srcptr[0])]) - dstptr[x + y * dst_stride / sizeof(dstptr[0])]);
-				return sum;
+						sum += std::abs(static_cast<decltype(sum + 0)>(srcp[x + y * stride / sizeof(srcp[0])]) - dstp[x + y * dst_stride / sizeof(dstp[0])]);
 			};
 			if (d->scenechange > 0.) {
 				auto dd2 = 0;
 				auto skiprest = false;
 				for (auto i = d->radius - 1; i >= 0; --i)
 					if (!skiprest && !planeDisabled[i]) {
-						auto scenevalues = c_scenechange(srcp[i], src_stride[i]);
-						if (scenevalues < d->scenechange) {
-							src_stride_trimmed[dd2] = src_stride[i];
-							srcp_trimmed[dd2] = srcp[i];
-							++dd2;
+						auto sum_ptr = alloca(std::max(sizeof(long long), sizeof(double)));
+						auto f = [&](auto srcp, auto dstp, auto sum_ptr) {
+							auto &scenevalues = *sum_ptr;
+							sc_f(srcp, dstp, src_stride[i], scenevalues);
+							if (scenevalues < d->scenechange) {
+								src_stride_trimmed[dd2] = src_stride[i];
+								srcp_trimmed[dd2] = reinterpret_cast<decltype(srcp_trimmed[0])>(srcp);
+								++dd2;
+							}
+							else
+								skiprest = true;
+							planeDisabled[i] = skiprest;
+						};
+						switch (pixel) {
+						case PixelType::Single:
+							f(reinterpret_cast<const float *>(srcp[i]),
+								reinterpret_cast<float *>(dstp),
+								reinterpret_cast<double *>(sum_ptr));
+							break;
+						case PixelType::Integer16:
+							f(reinterpret_cast<const uint16_t *>(srcp[i]),
+								reinterpret_cast<uint16_t *>(dstp),
+								reinterpret_cast<long long *>(sum_ptr));
+							break;
+						default:
+							f(srcp[i], dstp, reinterpret_cast<long long *>(sum_ptr));
+							break;
 						}
-						else
-							skiprest = true;
-						planeDisabled[i] = skiprest;
 					}
 					else
 						planeDisabled[i] = true;
 				skiprest = false;
 				for (auto i = 0; i < d->radius; ++i)
 					if (!skiprest && !planeDisabled[i + d->radius]) {
-						auto scenevalues = c_scenechange(srcp[i + d->radius], src_stride[i + d->radius]);
-						if (scenevalues < d->scenechange) {
-							src_stride_trimmed[dd2] = src_stride[i + d->radius];
-							srcp_trimmed[dd2] = srcp[i + d->radius];
-							++dd2;
+						auto sum_ptr = alloca(std::max(sizeof(long long), sizeof(double)));
+						auto f = [&](auto srcp, auto dstp, auto sum_ptr) {
+							auto &scenevalues = *sum_ptr;
+							sc_f(srcp, dstp, src_stride[i + d->radius], scenevalues);
+							if (scenevalues < d->scenechange) {
+								src_stride_trimmed[dd2] = src_stride[i + d->radius];
+								srcp_trimmed[dd2] = reinterpret_cast<decltype(srcp_trimmed[0])>(srcp);
+								++dd2;
+							}
+							else
+								skiprest = true;
+							planeDisabled[i + d->radius] = skiprest;
+						};
+						switch (pixel) {
+						case PixelType::Single:
+							f(reinterpret_cast<const float *>(srcp[i + d->radius]),
+								reinterpret_cast<float *>(dstp),
+								reinterpret_cast<double *>(sum_ptr));
+							break;
+						case PixelType::Integer16:
+							f(reinterpret_cast<const uint16_t *>(srcp[i + d->radius]),
+								reinterpret_cast<uint16_t *>(dstp),
+								reinterpret_cast<long long *>(sum_ptr));
+							break;
+						default:
+							f(srcp[i + d->radius], dstp, reinterpret_cast<long long *>(sum_ptr));
+							break;
 						}
-						else
-							skiprest = true;
-						planeDisabled[i + d->radius] = skiprest;
 					}
 					else
 						planeDisabled[i + d->radius] = true;
@@ -119,24 +175,46 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 					vsapi->freeFrame(x);
 				return dst;
 			}
-			auto c_div = dd + 1;
+			auto div = dd + 1;
 			for (auto y = 0; y < h; ++y) {
-				[&]() {
-					auto dstptr = reinterpret_cast<float *>(dstp);
-					auto srcptr = reinterpret_cast<const float **>(srcp);
+				auto sum_ptr = alloca(std::max(sizeof(long long), sizeof(double)));
+				auto f = [&](auto srcp, auto dstp, auto sum_ptr) {
 					for (auto x = 0; x < w; ++x) {
-						auto sum = 0.;
-						sum += dstptr[x];
+						auto &sum = *sum_ptr;
+						sum = 0;
+						sum += dstp[x];
 						for (auto frame = dd - 1; frame >= 0; --frame) {
-							auto absolute = std::abs(static_cast<double>(dstptr[x]) - srcptr[frame][x]);
+							auto absolute = std::abs(static_cast<decltype(sum + 0)>(dstp[x]) - srcp[frame][x]);
 							if (absolute <= current_threshold)
-								sum += srcptr[frame][x];
+								sum += srcp[frame][x];
 							else
-								sum += dstptr[x];
+								sum += dstp[x];
 						}
-						dstptr[x] = static_cast<float>(sum / c_div);
+						if (pixel != PixelType::Single) {
+							sum += div / 2;
+							sum /= div;
+							sum = sum < 0 ? 0 : sum > pmax ? pmax : sum;
+						}
+						else
+							sum /= div;
+						dstp[x] = static_cast<decltype(dstp[0] + 0)>(sum);
 					}
-				}();
+				};
+				switch (pixel) {
+				case PixelType::Single:
+					f(reinterpret_cast<const float **>(srcp),
+						reinterpret_cast<float *>(dstp),
+						reinterpret_cast<double *>(sum_ptr));
+					break;
+				case PixelType::Integer16:
+					f(reinterpret_cast<const uint16_t **>(srcp),
+						reinterpret_cast<uint16_t *>(dstp),
+						reinterpret_cast<long long *>(sum_ptr));
+					break;
+				default:
+					f(srcp, dstp, reinterpret_cast<long long *>(sum_ptr));
+					break;
+				}
 				for (auto i = 0; i < dd; ++i)
 					srcp[i] += src_stride[i];
 				dstp += dst_stride;
@@ -160,8 +238,13 @@ auto VS_CC temporalSoftenCreate(const VSMap *in, VSMap *out, void *userData, VSC
 	auto err = 0;
 	data->node = vsapi->propGetNode(in, "clip", 0, 0);
 	data->vi = vsapi->getVideoInfo(data->node);
-	if (!data->vi->format || data->vi->format->bitsPerSample < 32 || data->vi->format->sampleType != stFloat) {
-		vsapi->setError(out, "TemporalSoften: only constant format single precision floating point YUV, RGB, or Gray input supported");
+	if (!data->vi->format) {
+		vsapi->setError(out, "TemporalSoften: only constant format YUV, RGB, or Gray input supported");
+		vsapi->freeNode(data->node);
+		return;
+	}
+	if (data->vi->format->bitsPerSample == 16 && data->vi->format->sampleType == stFloat) {
+		vsapi->setError(out, "TemporalSoften: half precision not supported!");
 		vsapi->freeNode(data->node);
 		return;
 	}
@@ -217,6 +300,6 @@ auto VS_CC temporalSoftenCreate(const VSMap *in, VSMap *out, void *userData, VSC
 }
 
 VS_EXTERNAL_API(auto) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin) {
-	configFunc("com.denoiser.temporalsoften", "tsoft", "VapourSynth TemporalSoften Filter", VAPOURSYNTH_API_VERSION, 1, plugin);
+	configFunc("com.focus.temporalsoften", "focus", "VapourSynth TemporalSoften Filter", VAPOURSYNTH_API_VERSION, 1, plugin);
 	registerFunc("TemporalSoften", "clip:clip;radius:int:opt;luma_threshold:float:opt;chroma_threshold:float:opt;scenechange:float:opt", temporalSoftenCreate, 0, plugin);
 }
