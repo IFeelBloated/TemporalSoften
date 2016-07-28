@@ -183,8 +183,7 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 				auto f = [&](auto srcp, auto dstp, auto sum_ptr) {
 					for (auto x = 0; x < w; ++x) {
 						auto &sum = *sum_ptr;
-						sum = 0;
-						sum += dstp[x];
+						sum = dstp[x];
 						for (auto frame = dd - 1; frame >= 0; --frame) {
 							auto absolute = std::abs(static_cast<decltype(sum + 0)>(dstp[x]) - srcp[frame][x]);
 							if (absolute <= current_threshold)
