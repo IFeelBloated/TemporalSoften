@@ -75,7 +75,7 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 				auto srcptr = reinterpret_cast<const float *>(plane);
 				for (auto y = 0; y < h; ++y)
 					for (auto x = 0; x < wp; ++x)
-						sum += std::abs(static_cast<double>(srcptr[x + y * stride / 2]) - dstptr[x + y * dst_stride / 2]);
+						sum += std::abs(static_cast<double>(srcptr[x + y * stride / sizeof(srcptr[0])]) - dstptr[x + y * dst_stride / sizeof(dstptr[0])]);
 				return sum;
 			};
 			if (d->scenechange > 0.) {
@@ -160,8 +160,8 @@ auto VS_CC temporalSoftenCreate(const VSMap *in, VSMap *out, void *userData, VSC
 	auto err = 0;
 	data->node = vsapi->propGetNode(in, "clip", 0, 0);
 	data->vi = vsapi->getVideoInfo(data->node);
-	if (!data->vi->format) {
-		vsapi->setError(out, "TemporalSoften: only constant format input supported");
+	if (!data->vi->format || data->vi->format->bitsPerSample < 32 || data->vi->format->sampleType != stFloat) {
+		vsapi->setError(out, "TemporalSoften: only constant format single precision floating point YUV, RGB, or Gray input supported");
 		vsapi->freeNode(data->node);
 		return;
 	}
