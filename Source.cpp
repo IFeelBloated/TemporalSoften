@@ -5,7 +5,7 @@
 
 enum class PixelType {
 	Integer8 = 8,
-	Integer16 = 16,
+	Integer9to16 = 16,
 	Single = 32
 };
 
@@ -22,12 +22,13 @@ auto VS_CC temporalSoftenInit(VSMap *in, VSMap *out, void **instanceData, VSNode
 	auto d = reinterpret_cast<TemporalSoftenData *>(*instanceData);
 	vsapi->setVideoInfo(d->vi, 1, node);
 	d->scenechange *= d->vi->width / 32 * 32 * d->vi->height;
-	auto pixel = static_cast<PixelType>(d->vi->format->bitsPerSample);
+	auto bits = d->vi->format->bitsPerSample;
+	auto pixel = static_cast<PixelType>(bits > 8 && bits < 16 ? 16 : bits);
 	switch (pixel) {
-	case PixelType::Integer16:
-		d->luma_threshold *= 257;
-		d->chroma_threshold *= 257;
-		d->scenechange *= 257;
+	case PixelType::Integer9to16:
+		d->luma_threshold *= ((1 << bits) - 1) / 255.;
+		d->chroma_threshold *= ((1 << bits) - 1) / 255.;
+		d->scenechange *= ((1 << bits) - 1) / 255.;
 		break;
 	case PixelType::Single:
 		d->luma_threshold /= 255;
@@ -60,8 +61,9 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 			src[i - n + d->radius] = vsapi->getFrameFilter(std::min(d->vi->numFrames - 1, std::max(i, 0)), d->node, frameCtx);
 		auto dst = vsapi->copyFrame(src[d->radius], core);
 		auto fi = d->vi->format;
-		auto pixel = static_cast<PixelType>(fi->bitsPerSample);
-		auto pmax = (1 << fi->bitsPerSample) - 1;
+		auto bits = fi->bitsPerSample;
+		auto pixel = static_cast<PixelType>(bits > 8 && bits < 16 ? 16 : bits);
+		auto pmax = (1 << bits) - 1;
 		for (auto plane = 0; plane < fi->numPlanes; ++plane) {
 			if (fi->colorFamily != cmRGB) {
 				if (plane == 0 && d->luma_threshold == 0.)
@@ -120,7 +122,7 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 								reinterpret_cast<float *>(dstp),
 								reinterpret_cast<double *>(sum_ptr));
 							break;
-						case PixelType::Integer16:
+						case PixelType::Integer9to16:
 							f(reinterpret_cast<const uint16_t *>(srcp[i]),
 								reinterpret_cast<uint16_t *>(dstp),
 								reinterpret_cast<long long *>(sum_ptr));
@@ -154,7 +156,7 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 								reinterpret_cast<float *>(dstp),
 								reinterpret_cast<double *>(sum_ptr));
 							break;
-						case PixelType::Integer16:
+						case PixelType::Integer9to16:
 							f(reinterpret_cast<const uint16_t *>(srcp[i + d->radius]),
 								reinterpret_cast<uint16_t *>(dstp),
 								reinterpret_cast<long long *>(sum_ptr));
@@ -206,7 +208,7 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 						reinterpret_cast<float *>(dstp),
 						reinterpret_cast<double *>(sum_ptr));
 					break;
-				case PixelType::Integer16:
+				case PixelType::Integer9to16:
 					f(reinterpret_cast<const uint16_t **>(srcp),
 						reinterpret_cast<uint16_t *>(dstp),
 						reinterpret_cast<long long *>(sum_ptr));
