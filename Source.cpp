@@ -1,6 +1,9 @@
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
+#include <cstring>
 #include <malloc.h>
+#include <stdlib.h> 
 #include "VapourSynth.h"
 
 enum class PixelType {
@@ -152,8 +155,8 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 						}
 					else
 						planeDisabled[i + d->radius] = true;
-				memcpy(srcp, srcp_trimmed, dd2 * sizeof(srcp[0]));
-				memcpy(src_stride, src_stride_trimmed, dd2 * sizeof(src_stride[0]));
+				std::memcpy(srcp, srcp_trimmed, dd2 * sizeof(srcp[0]));
+				std::memcpy(src_stride, src_stride_trimmed, dd2 * sizeof(src_stride[0]));
 				dd = dd2;
 			}
 			if (dd < 1) {
