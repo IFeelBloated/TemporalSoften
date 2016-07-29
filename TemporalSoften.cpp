@@ -1,24 +1,6 @@
-#include <algorithm>
-#include <cstring>
-#include <cmath>
-#include "VapourSynth.h"
+#include "shared.h"
 
-enum class PixelType {
-	Integer8 = 1,
-	Integer9to16 = 2,
-	Single = 4
-};
-
-struct TemporalSoftenData final {
-	VSNodeRef *node = nullptr;
-	const VSVideoInfo *vi = nullptr;
-	int radius = 0;
-	double luma_threshold = 0.;
-	double chroma_threshold = 0.;
-	double scenechange = 0.;
-};
-
-auto VS_CC temporalSoftenInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
+auto VS_CC temporalsoftenInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
 	auto d = reinterpret_cast<TemporalSoftenData *>(*instanceData);
 	vsapi->setVideoInfo(d->vi, 1, node);
 	d->scenechange *= d->vi->width / 32 * 32 * d->vi->height;
@@ -39,7 +21,7 @@ auto VS_CC temporalSoftenInit(VSMap *in, VSMap *out, void **instanceData, VSNode
 	}
 }
 
-auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi)->const VSFrameRef *{
+auto VS_CC temporalsoftenGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi)->const VSFrameRef *{
 	auto d = reinterpret_cast<TemporalSoftenData *>(*instanceData);
 	if (activationReason == arInitial) {
 		auto first = n - d->radius;
@@ -192,13 +174,13 @@ auto VS_CC temporalSoftenGetFrame(int n, int activationReason, void **instanceDa
 	return nullptr;
 }
 
-auto VS_CC temporalSoftenFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+auto VS_CC temporalsoftenFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
 	auto d = reinterpret_cast<TemporalSoftenData *>(instanceData);
 	vsapi->freeNode(d->node);
 	delete d;
 }
 
-auto VS_CC temporalSoftenCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+auto VS_CC temporalsoftenCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
 	auto data = new TemporalSoftenData;
 	auto err = 0;
 	data->node = vsapi->propGetNode(in, "clip", 0, 0);
@@ -260,11 +242,10 @@ auto VS_CC temporalSoftenCreate(const VSMap *in, VSMap *out, void *userData, VSC
 		vsapi->freeNode(data->node);
 		return;
 	}
-	vsapi->createFilter(in, out, "TemporalSoften", temporalSoftenInit, temporalSoftenGetFrame, temporalSoftenFree, fmParallel, 0, data, core);
+	vsapi->createFilter(in, out, "TemporalSoften", temporalsoftenInit, temporalsoftenGetFrame, temporalsoftenFree, fmParallel, 0, data, core);
 	return;
 }
 
-VS_EXTERNAL_API(auto) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin) {
-	configFunc("com.focus.temporalsoften", "focus", "VapourSynth TemporalSoften Filter", VAPOURSYNTH_API_VERSION, 1, plugin);
-	registerFunc("TemporalSoften", "clip:clip;radius:int:opt;luma_threshold:float:opt;chroma_threshold:float:opt;scenechange:float:opt", temporalSoftenCreate, 0, plugin);
+auto temporalsoftenRegister(VSRegisterFunction registerFunc, VSPlugin *plugin) {
+	registerFunc("TemporalSoften", "clip:clip;radius:int:opt;luma_threshold:float:opt;chroma_threshold:float:opt;scenechange:float:opt", temporalsoftenCreate, 0, plugin);
 }
